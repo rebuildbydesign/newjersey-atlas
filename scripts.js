@@ -150,7 +150,7 @@ function addCongressionalLayers() {
 function addHouseLayers() {
     map.addSource('njHouse', {
         type: 'geojson',
-        data: 'data/NJ_House.geojson'
+        data: 'data/Nj_House.geojson'
     });
 
     map.addLayer({
