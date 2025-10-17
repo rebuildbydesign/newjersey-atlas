@@ -1,16 +1,18 @@
 mapboxgl.accessToken = 'pk.eyJ1IjoiajAwYnkiLCJhIjoiY2x1bHUzbXZnMGhuczJxcG83YXY4czJ3ayJ9.S5PZpU9VDwLMjoX_0x5FDQ';
 
-// HOLDS THE CURRENTLY OPEN POPUP
+// -------------------- GLOBALS --------------------
 var currentPopup = null;
-
+let NJ_CONGRESS_GEOJSON = null;
+let NJ_HOUSE_GEOJSON = null;
+let NJ_SENATE_GEOJSON = null;
 
 // INITIALIZE MAP
 var map = new mapboxgl.Map({
     container: 'map',
     style: 'mapbox://styles/mapbox/light-v11',
-    center: [-74.4057, 40.0583], // CENTERED ON NEW JERSEY
-    zoom: 7.2,
-    minZoom: 6.2
+    center: [-74.77114, 40.26453], // CENTERED ON NEW JERSEY
+    zoom: 7.5,
+    minZoom: 7
 });
 
 // RESPONSIVE INITIAL ZOOM FOR MOBILE
@@ -18,84 +20,88 @@ if (window.innerWidth <= 700) {
     map.setZoom(6.2);
 }
 
-// ADD MAPBOX GEOCODER (ADDRESS SEARCH)
+
+
+// -------------------- GEOCODER -------------------
 var geocoder = new MapboxGeocoder({
-    accessToken: mapboxgl.accessToken,
-    mapboxgl: mapboxgl,
-    marker: false,
-    placeholder: 'Search for an address',
-    flyTo: {
-        zoom: 9,
-        speed: 1.2,
-        curve: 1
-    }
+  accessToken: mapboxgl.accessToken,
+  mapboxgl: mapboxgl,
+  marker: false,
+  placeholder: 'Search for an address',
+  flyTo: { zoom: 9, speed: 1.2, curve: 1 }
 });
 document.getElementById('geocoder').appendChild(geocoder.onAdd(map));
 
-// HANDLE GEOCODER SEARCH RESULTS (POPUP LOGIC)
+// When user searches, build popup from county + districts (regardless of visibility)
 geocoder.on('result', function (e) {
-    var lngLat = e.result.center;
-    var point = map.project(lngLat);
+  const lngLat = e.result.center;
+  const pointPx = map.project(lngLat);
 
-    var features = map.queryRenderedFeatures(point, {
-        layers: ['femaDisasters', 'congressionalDistricts', 'houseDistricts', 'senateDistricts']
-    });
+  const countyFeatures = map.queryRenderedFeatures(pointPx, { layers: ['femaDisasters'] });
 
-    if (features.length > 0) {
-        var featureData = consolidateFeatureData(features);
-        var popupContent = createPopupContent(featureData);
+  // If user has any district layers visible, include rendered hits too (nice to have)
+  const renderedDistricts = map.queryRenderedFeatures(pointPx, {
+    layers: ['congressionalDistricts', 'houseDistricts', 'senateDistricts']
+  });
 
-        var femaFeature = features.find(f => f.layer && f.layer.id === 'femaDisasters');
-        if (femaFeature && typeof turf !== 'undefined') {
-            // USE CENTROID FOR FEMA DISASTER FEATURE
-            var geojsonFeature = {
-                "type": "Feature",
-                "geometry": femaFeature.geometry,
-                "properties": femaFeature.properties
-            };
-            var centroid = turf.centroid(geojsonFeature).geometry.coordinates;
-            showPopup({ lng: centroid[0], lat: centroid[1] }, popupContent);
-        } else {
-            showPopup(lngLat, popupContent);
-        }
+  const districtsFromMemory = getDistrictFeaturesFromMemory(lngLat);
+
+  const allFeatures = countyFeatures.concat(renderedDistricts, districtsFromMemory);
+
+  if (allFeatures.length > 0) {
+    const featureData = consolidateFeatureData(allFeatures);
+    const popupContent = createPopupContent(featureData);
+
+    const femaFeature = countyFeatures.find(f => f.layer && f.layer.id === 'femaDisasters');
+    if (femaFeature && typeof turf !== 'undefined') {
+      const centroid = turf.centroid({
+        type: 'Feature',
+        geometry: femaFeature.geometry,
+        properties: femaFeature.properties
+      }).geometry.coordinates;
+      showPopup({ lng: centroid[0], lat: centroid[1] }, popupContent);
     } else {
-        showPopup(lngLat, "<div style='color:#222'>No county or district data at this location.</div>");
+      showPopup(lngLat, popupContent);
     }
+  } else {
+    showPopup(lngLat, "<div style='color:#222'>No county or district data at this location.</div>");
+  }
 });
 
-// LOAD MAP AND LAYERS, SETUP TOOLTIP INTERACTION
+
+// -------------------- LOAD -----------------------
 map.on('load', function () {
-    addLayers();
-    handleMapClick();
+  addLayers();         // FEMA + district layers
+  handleMapClick();    // click logic
+  setupLayerToggles(); // UI toggles
 
-    // TOOLTIP FOR HOVERING OVER COUNTY
-    map.on('mousemove', (e) => {
-        const features = map.queryRenderedFeatures(e.point, {
-            layers: ['femaDisasters']
-        });
-
-        if (features.length > 0) {
-            map.getCanvas().style.cursor = 'pointer';
-            const countyName = features[0].properties.NAMELSAD;
-
-            tooltip.style.display = 'block';
-            tooltip.style.left = e.point.x + 15 + 'px';
-            tooltip.style.top = e.point.y + 15 + 'px';
-            tooltip.innerHTML = `Click to learn more<br><strong>${countyName}</strong>`;
-        } else {
-            map.getCanvas().style.cursor = '';
-            tooltip.style.display = 'none';
-        }
-    });
+  // Tooltip for county hover
+  const tooltip = document.getElementById('map-tooltip');
+  map.on('mousemove', (e) => {
+    const features = map.queryRenderedFeatures(e.point, { layers: ['femaDisasters'] });
+    if (features.length > 0) {
+      map.getCanvas().style.cursor = 'pointer';
+      tooltip.style.display = 'block';
+      tooltip.style.left = e.point.x + 15 + 'px';
+      tooltip.style.top = e.point.y + 15 + 'px';
+      tooltip.innerHTML = `Click to learn more<br><strong>${features[0].properties.NAMELSAD}</strong>`;
+    } else {
+      map.getCanvas().style.cursor = '';
+      tooltip.style.display = 'none';
+    }
+  });
 });
 
 const tooltip = document.getElementById('map-tooltip');
 
-// DISABLE SCROLL ZOOM INITIALLY TO PREVENT ACCIDENTAL ZOOMING
+// Disable scroll zoom initially
 map.scrollZoom.disable();
-map.on('click', () => {
-    map.scrollZoom.enable();
-});
+map.on('click', () => map.scrollZoom.enable());
+
+
+
+
+
 
 // ADD ALL MAP LAYERS (FEMA, CONGRESS, HOUSE, SENATE)
 function addLayers() {
@@ -124,192 +130,381 @@ function addLayers() {
         }
     });
 
+    
     addCongressionalLayers();
     addHouseLayers();
     addSenateLayers();
 }
 
-// ADD CONGRESSIONAL DISTRICT POLYGONS
+
+// ---------------------
+// CONGRESSIONAL LAYERS
+// ---------------------
 function addCongressionalLayers() {
-    map.addSource('njCongress', {
-        type: 'geojson',
-        data: 'data/NJ_Congress.geojson'
-    });
+  fetch('data/NJ_Congress.geojson')
+    .then(r => r.json())
+    .then(data => {
+      NJ_CONGRESS_GEOJSON = data;
+      map.addSource('njCongress', { type: 'geojson', data });
 
-    map.addLayer({
-        'id': 'congressionalDistricts',
-        'type': 'fill',
-        'source': 'njCongress',
-        'paint': {
-            'fill-color': 'transparent'
+      // Polygon fill (transparent so we only see outline/labels)
+      map.addLayer({
+        id: 'congressionalDistricts',
+        type: 'fill',
+        source: 'njCongress',
+        layout: { visibility: 'none' },
+        paint: {
+          'fill-color': 'transparent',
+          'fill-opacity': 1
         }
+      });
+
+      // Outline stroke (adjust line-width here)
+      map.addLayer({
+        id: 'congressionalDistrictsOutline',
+        type: 'line',
+        source: 'njCongress',
+        layout: { visibility: 'none' },
+        paint: {
+          'line-color': '#000',
+          'line-width': 1.5   // 👈 change this value for stroke thickness
+        }
+      });
+
+      // Labels
+      map.addLayer({
+        id: 'congressionalLabels',
+        type: 'symbol',
+        source: 'njCongress',
+        layout: {
+          'visibility': 'none',
+          'text-field': ['get', 'NAMELSAD'],
+          'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+          'text-size': 20
+        },
+        paint: {
+          'text-color': '#000',
+          'text-halo-color': '#ffffff',
+          'text-halo-width': 1.5
+        }
+      });
     });
 }
 
-// ADD STATE HOUSE DISTRICT POLYGONS
+// ---------------------
+// HOUSE LAYERS
+// ---------------------
 function addHouseLayers() {
-    map.addSource('njHouse', {
-        type: 'geojson',
-        data: 'data/Nj_House.geojson'
-    });
+  fetch('data/NJ_House.geojson')
+    .then(r => r.json())
+    .then(data => {
+      NJ_HOUSE_GEOJSON = data;
+      map.addSource('njHouse', { type: 'geojson', data });
 
-    map.addLayer({
-        'id': 'houseDistricts',
-        'type': 'fill',
-        'source': 'njHouse',
-        'paint': {
-            'fill-color': 'transparent'
-        }
+      // Polygon fill
+map.addLayer({
+  id: 'houseDistricts',
+  type: 'fill',
+  source: 'njHouse',
+  layout: { visibility: 'visible' },   // 👈 default ON
+  paint: {
+    'fill-color': 'transparent',
+    'fill-opacity': 1
+  }
+});
+
+// Outline stroke
+map.addLayer({
+  id: 'houseDistrictsOutline',
+  type: 'line',
+  source: 'njHouse',
+  layout: { visibility: 'visible' },   // 👈 default ON
+  paint: {
+    'line-color': '#000',
+    'line-width': 1.5
+  }
+});
+
+// Labels
+map.addLayer({
+  id: 'houseLabels',
+  type: 'symbol',
+  source: 'njHouse',
+  layout: {
+    'visibility': 'visible',           // 👈 default ON
+    'text-field': ['get', 'districtnum'],
+    'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+    'text-size': 14
+  },
+  paint: {
+    'text-color': '#000',
+    'text-halo-color': '#ffffff',
+    'text-halo-width': 1.5
+  }
+});
+
     });
 }
 
-// ADD STATE SENATE DISTRICT POLYGONS
+// ---------------------
+// SENATE LAYERS
+// ---------------------
 function addSenateLayers() {
-    map.addSource('njSenate', {
-        type: 'geojson',
-        data: 'data/NJ_Senate.geojson'
-    });
+  fetch('data/NJ_Senate.geojson')
+    .then(r => r.json())
+    .then(data => {
+      NJ_SENATE_GEOJSON = data;
+      map.addSource('njSenate', { type: 'geojson', data });
 
-    map.addLayer({
-        'id': 'senateDistricts',
-        'type': 'fill',
-        'source': 'njSenate',
-        'paint': {
-            'fill-color': 'transparent'
+      // Polygon fill
+      map.addLayer({
+        id: 'senateDistricts',
+        type: 'fill',
+        source: 'njSenate',
+        layout: { visibility: 'none' },
+        paint: {
+          'fill-color': 'transparent',
+          'fill-opacity': 1
         }
+      });
+
+      // Outline stroke
+      map.addLayer({
+        id: 'senateDistrictsOutline',
+        type: 'line',
+        source: 'njSenate',
+        layout: { visibility: 'none' },
+        paint: {
+          'line-color': '#000',
+          'line-width': 1.5
+        }
+      });
+
+      // Labels
+      map.addLayer({
+        id: 'senateLabels',
+        type: 'symbol',
+        source: 'njSenate',
+        layout: {
+          'visibility': 'none',
+          'text-field': ['get', 'DISTRICT'], // <-- senate district field
+          'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+          'text-size': 14
+        },
+        paint: {
+          'text-color': '#000',
+          'text-halo-color': '#ffffff',
+          'text-halo-width': 1.5
+        }
+      });
     });
 }
 
-// HANDLE MAP CLICK POPUP (COUNTY + DISTRICT DETAILS)
+
+
+
+
+
+// -------------------- CLICK POPUP ----------------
 function handleMapClick() {
-    map.on('click', function (e) {
-        var features = map.queryRenderedFeatures(e.point, {
-            layers: ['femaDisasters', 'congressionalDistricts', 'houseDistricts', 'senateDistricts']
-        });
+  map.on('click', function (e) {
+    const lngLat = [e.lngLat.lng, e.lngLat.lat];
 
-        if (features.length > 0) {
-            var featureData = consolidateFeatureData(features);
-            var popupContent = createPopupContent(featureData);
+    // FEMA (visible)
+    const countyFeatures = map.queryRenderedFeatures(e.point, { layers: ['femaDisasters'] });
 
-            var femaFeature = features.find(f => f.layer && f.layer.id === 'femaDisasters');
-            var isMobile = window.innerWidth <= 700;
-
-            if (femaFeature && typeof turf !== 'undefined' && !isMobile) {
-                // DESKTOP: SHOW POPUP AT COUNTY CENTROID
-                var geojsonFeature = {
-                    "type": "Feature",
-                    "geometry": femaFeature.geometry,
-                    "properties": femaFeature.properties
-                };
-                var centroid = turf.centroid(geojsonFeature).geometry.coordinates;
-                showPopup({ lng: centroid[0], lat: centroid[1] }, popupContent);
-            } else {
-                // MOBILE: SHOW POPUP AT CLICK LOCATION
-                showPopup(e.lngLat, popupContent);
-            }
-        }
+    // Districts from visible layers (optional boost) + memory (always)
+    const renderedDistricts = map.queryRenderedFeatures(e.point, {
+      layers: ['congressionalDistricts', 'houseDistricts', 'senateDistricts']
     });
+
+    const districtsFromMemory = getDistrictFeaturesFromMemory(lngLat);
+
+    const allFeatures = countyFeatures.concat(renderedDistricts, districtsFromMemory);
+
+    if (allFeatures.length > 0) {
+      const featureData = consolidateFeatureData(allFeatures);
+      const popupContent = createPopupContent(featureData);
+
+      const femaFeature = countyFeatures.find(f => f.layer && f.layer.id === 'femaDisasters');
+      const isMobile = window.innerWidth <= 700;
+
+      if (femaFeature && typeof turf !== 'undefined' && !isMobile) {
+        const centroid = turf.centroid({
+          type: 'Feature',
+          geometry: femaFeature.geometry,
+          properties: femaFeature.properties
+        }).geometry.coordinates;
+        showPopup({ lng: centroid[0], lat: centroid[1] }, popupContent);
+      } else {
+        showPopup(e.lngLat, popupContent);
+      }
+    }
+  });
 }
 
-// CONSOLIDATE ALL FEATURE DATA FROM CLICK OR SEARCH
+// -------------------- TOGGLES --------------------
+function setupLayerToggles() {
+  // Congressional Toggle
+  document.getElementById('toggle-congress').addEventListener('change', function (e) {
+    const visibility = e.target.checked ? 'visible' : 'none';
+    map.setLayoutProperty('congressionalDistricts', 'visibility', visibility);
+    map.setLayoutProperty('congressionalDistrictsOutline', 'visibility', visibility);
+    map.setLayoutProperty('congressionalLabels', 'visibility', visibility);
+  });
+
+  // House Toggle
+  document.getElementById('toggle-house').addEventListener('change', function (e) {
+    const visibility = e.target.checked ? 'visible' : 'none';
+    map.setLayoutProperty('houseDistricts', 'visibility', visibility);
+    map.setLayoutProperty('houseDistrictsOutline', 'visibility', visibility);
+    map.setLayoutProperty('houseLabels', 'visibility', visibility);
+  });
+
+  // Senate Toggle
+  document.getElementById('toggle-senate').addEventListener('change', function (e) {
+    const visibility = e.target.checked ? 'visible' : 'none';
+    map.setLayoutProperty('senateDistricts', 'visibility', visibility);
+    map.setLayoutProperty('senateDistrictsOutline', 'visibility', visibility);
+    map.setLayoutProperty('senateLabels', 'visibility', visibility);
+  });
+}
+
+
+// -------------------- DATA FUSION ----------------
 function consolidateFeatureData(features) {
-    var featureData = {
-        countyName: '',
-        disasters: '',
-        femaObligations: '',
-        countyPopulation: '',
-        countyPerCapita: '',
-        congressionalDist: '',
-        congressRepName: '',
-        houseDist: '',
-        houseRepName: '',
-        senateDist: '',
-        senateRepName: ''
-    };
+  const featureData = {
+    countyName: '',
+    disasters: '',
+    femaObligations: '',
+    countyPopulation: '',
+    countyPerCapita: '',
+    countySVI: '',
+    congressionalDist: '',
+    congressRepName: '',
+    houseDist: '',
+    houseRepName: '',
+    senateDist: '',
+    senateRepName: ''
+  };
 
-    features.forEach(function (feature) {
-        switch (feature.layer.id) {
-            case 'femaDisasters':
-                featureData.countyName = feature.properties.NAMELSAD;
-                featureData.disasters = feature.properties.COUNTY_DISASTER_COUNT;
-                featureData.femaObligations = feature.properties.COUNTY_TOTAL_FEMA;
-                featureData.countyPopulation = feature.properties.COUNTY_POPULATION;
-                featureData.countyPerCapita = feature.properties.COUNTY_PER_CAPITA;
-                featureData.countySVI = feature.properties.SVI_2022;
-                break;
-            case 'congressionalDistricts':
-                featureData.congressionalDist = feature.properties.OFFICE_ID;
-                featureData.congressRepName = feature.properties.FIRSTNAME + ' ' + feature.properties.LASTNAME;
-                break;
-            case 'houseDistricts':
-                featureData.houseDist = feature.properties.District;
-                featureData.houseRepName = feature.properties.Full_Name;
-                break;
-            case 'senateDistricts':
-                featureData.senateDist = feature.properties.District;
-                featureData.senateRepName = feature.properties.Full_Name;
-                break;
-        }
-    });
+  features.forEach(function (feature) {
+    const layerId = feature.layer && feature.layer.id;
+    if (!layerId) return;
 
-    return featureData;
+    switch (layerId) {
+      case 'femaDisasters':
+        featureData.countyName = feature.properties.NAMELSAD;
+        featureData.disasters = feature.properties.COUNTY_DISASTER_COUNT;
+        featureData.femaObligations = feature.properties.COUNTY_TOTAL_FEMA;
+        featureData.countyPopulation = feature.properties.COUNTY_POPULATION;
+        featureData.countyPerCapita = feature.properties.COUNTY_PER_CAPITA;
+        featureData.countySVI = feature.properties.SVI_2022;
+        break;
+
+      case 'congressionalDistricts':
+        featureData.congressionalDist = feature.properties.OFFICE_ID;
+        featureData.congressRepName =
+          [feature.properties.FIRSTNAME, feature.properties.LASTNAME].filter(Boolean).join(' ');
+        break;
+
+      case 'houseDistricts':
+        featureData.houseDist = feature.properties.District;
+        featureData.houseRepName = feature.properties.Full_Name;
+        break;
+
+      case 'senateDistricts':
+        featureData.senateDist = feature.properties.District;
+        featureData.senateRepName = feature.properties.Full_Name;
+        break;
+    }
+  });
+
+  return featureData;
 }
 
-// CREATE HTML FOR POPUP PANEL
+// -------------------- POPUP ----------------------
 function createPopupContent(featureData) {
-    return `
-      <div style="color:#222; font-family:inherit;">
-        <div style="
-            background: #f5e6e6; 
-            color: #444;
-            font-size: 0.98em;
-            font-weight: 600; 
-            padding: 7px 12px 7px 12px;
-            margin-bottom: 1em;
-            border-left: 5px solid #a50f15;
-        ">
-          Information for Selected Location
-        </div>
-        <div style="font-size:0.96em; color:#444; margin-bottom:0.9em;">
-          This summary shows federally declared disaster data and elected officials for the area you selected or searched.
-        </div>
-        <div style="margin-bottom:0.55em;">
-          <div style="font-size:1.18em; font-weight:bold; color:#a50f15; letter-spacing:0.02em;">${featureData.countyName || 'County'}</div>
-        </div>
-        <div style="margin-bottom:0.75em; line-height:1.55;">
-            <strong>Federal Disaster Declarations:</strong> ${featureData.disasters ?? 'N/A'}<br>
-            <strong>FEMA Obligations (PA+HM):</strong> ${featureData.femaObligations ? `${parseFloat(featureData.femaObligations).toLocaleString('en-US', { style: 'currency', currency: 'USD' })}` : 'N/A'}<br>
-            <strong>County Population:</strong> ${featureData.countyPopulation ? parseInt(featureData.countyPopulation).toLocaleString('en-US') : 'N/A'}<br>
-            <strong>Per Capita FEMA Aid:</strong> ${featureData.countyPerCapita ? `${parseFloat(featureData.countyPerCapita).toLocaleString('en-US', { style: 'currency', currency: 'USD' })}` : 'N/A'}<br>
-            <strong>SVI Score:</strong> ${featureData.countySVI ?? 'N/A'}
-        </div>
-        <div style="border-top:1px solid #ececec; margin:1em 0 1em 0;"></div>
-        <div style="font-size:1.18em; font-weight:bold; color:#a50f15; letter-spacing:0.02em;">
-          Elected Officials Covering This Location
-        </div>
-        <ul style="list-style:none; padding:0; margin:0 0 0.9em 0;">
-          <li style="margin-bottom: 3px;"><strong>U.S. Senate:</strong> Cory Booker (D), Andy Kim (D)</li>
-          <li style="margin-bottom: 3px;"><strong>U.S. House:</strong> ${featureData.congressRepName || 'N/A'} (${featureData.congressionalDist || 'N/A'})</li>
-          <li style="margin-bottom: 3px;"><strong>State Senate:</strong> ${featureData.senateRepName || 'N/A'} (${featureData.senateDist || 'N/A'})</li>
-          <li style="margin-bottom: 3px;"><strong>State House:</strong> ${featureData.houseRepName || 'N/A'} (${featureData.houseDist || 'N/A'})</li>
-        </ul>
-        <div style="color:gray; font-style:italic; font-size:0.85em;">
-          * <a href="https://rebuildbydesign.org/atlas-of-disaster" target="_blank" style="color:gray;">Atlas of Disaster (2011–2024) by Rebuild by Design</a>
+  return `
+    <div style="color:#222; font-family:inherit;">
+      <div style="
+          background:#f5e6e6;color:#444;font-size:0.98em;font-weight:600;
+          padding:7px 12px;margin-bottom:1em;border-left:5px solid #a50f15;">
+        Information for Selected Location
+      </div>
+      <div style="font-size:0.96em;color:#444;margin-bottom:0.9em;">
+        This summary shows federally declared disaster data and elected officials for the area you selected or searched.
+      </div>
+      <div style="margin-bottom:0.55em;">
+        <div style="font-size:1.18em;font-weight:bold;color:#a50f15;letter-spacing:0.02em;">
+          ${featureData.countyName || 'County'}
         </div>
       </div>
-    `;
+      <div style="margin-bottom:0.75em;line-height:1.55;">
+        <strong>Federal Disaster Declarations:</strong> ${featureData.disasters ?? 'N/A'}<br>
+        <strong>FEMA Obligations (PA+HM):</strong> ${
+          featureData.femaObligations
+            ? `${parseFloat(featureData.femaObligations).toLocaleString('en-US', { style: 'currency', currency: 'USD' })}`
+            : 'N/A'
+        }<br>
+        <strong>County Population:</strong> ${
+          featureData.countyPopulation ? parseInt(featureData.countyPopulation).toLocaleString('en-US') : 'N/A'
+        }<br>
+        <strong>Per Capita FEMA Aid:</strong> ${
+          featureData.countyPerCapita
+            ? `${parseFloat(featureData.countyPerCapita).toLocaleString('en-US', { style: 'currency', currency: 'USD' })}`
+            : 'N/A'
+        }<br>
+        <strong>SVI Score:</strong> ${featureData.countySVI ?? 'N/A'}
+      </div>
+      <div style="border-top:1px solid #ececec;margin:1em 0;"></div>
+      <div style="font-size:1.18em;font-weight:bold;color:#a50f15;letter-spacing:0.02em;">
+        Elected Officials Covering This Location
+      </div>
+      <ul style="list-style:none;padding:0;margin:0 0 0.9em 0;">
+        <li style="margin-bottom:3px;"><strong>U.S. Senate:</strong> Mitch McConnell (R), Rand Paul (R)</li>
+        <li style="margin-bottom:3px;"><strong>U.S. House:</strong> ${featureData.congressRepName || 'N/A'} (${featureData.congressionalDist || 'N/A'})</li>
+        <li style="margin-bottom:3px;"><strong>State Senate:</strong> ${featureData.senateRepName || 'N/A'} (${featureData.senateDist || 'N/A'})</li>
+        <li style="margin-bottom:3px;"><strong>State House:</strong> ${featureData.houseRepName || 'N/A'} (${featureData.houseDist || 'N/A'})</li>
+      </ul>
+      <div style="color:gray;font-style:italic;font-size:0.85em;">
+        * <a href="https://rebuildbydesign.org/atlas-of-disaster" target="_blank" style="color:gray;">Atlas of Disaster (2011–2024) by Rebuild by Design</a>
+      </div>
+    </div>
+  `;
 }
 
-// SHOW MAPBOX POPUP WITH PROVIDED CONTENT
 function showPopup(lngLat, content) {
-    // CLOSE EXISTING POPUP IF IT EXISTS
-    if (currentPopup) {
-        currentPopup.remove();
-    }
-    // CREATE AND SHOW NEW POPUP, SAVE TO GLOBAL
-    currentPopup = new mapboxgl.Popup()
-        .setLngLat(lngLat)
-        .setHTML(content)
-        .addTo(map);
+  if (currentPopup) currentPopup.remove();
+  currentPopup = new mapboxgl.Popup().setLngLat(lngLat).setHTML(content).addTo(map);
 }
 
+// -------------------- CORE FIX -------------------
+// Robust point-in-polygon against in-memory GeoJSON (works even if layer is hidden)
+function getDistrictFeaturesFromMemory(lngLat) {
+  const pt = turf.point(lngLat);
+  const hits = [];
+
+  function addHits(geojson, layerId) {
+    if (!geojson || !geojson.features) return;
+    for (const f of geojson.features) {
+      // turf.booleanPointInPolygon supports Polygon & MultiPolygon
+      if (turf.booleanPointInPolygon(pt, f)) {
+        hits.push({
+          type: 'Feature',
+          geometry: f.geometry,
+          properties: f.properties,
+          layer: { id: layerId }
+        });
+        // only 1 match per layer is needed
+        break;
+      }
+    }
+  }
+
+  addHits(NJ_CONGRESS_GEOJSON, 'congressionalDistricts');
+  addHits(NJ_HOUSE_GEOJSON, 'houseDistricts');
+  addHits(NJ_SENATE_GEOJSON, 'senateDistricts');
+
+  return hits;
+}
